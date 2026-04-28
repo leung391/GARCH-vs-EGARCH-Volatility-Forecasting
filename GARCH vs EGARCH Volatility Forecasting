@@ -1,0 +1,264 @@
+# GARCH Volatility Project - Fin Econometrics 
+# i kept getting errors so i just left some stuff in here lol
+# sources: lecture slides, arch library docs, some stack overflow
+ 
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from arch import arch_model
+import yfinance as yf
+import warnings
+warnings.filterwarnings('ignore')  # too many warnings was annoying me
+ 
+ 
+# -------------------------------------------------------
+# STEP 1: get the data
+# -------------------------------------------------------
+ 
+# download stock data (using SPY as a proxy for "equity returns")
+myStockData = yf.download("SPY", start="2015-01-01", end="2023-12-31")
+ 
+# compute daily returns (log returns i think are better??)
+closePrice = myStockData['Close']
+daily_ret = np.log(closePrice / closePrice.shift(1))  # log returns
+daily_ret = daily_ret.dropna()
+ 
+# also tried simple returns just in case - not sure which one is better
+simple_rets = closePrice.pct_change().dropna()
+# i'll use log returns since thats what the slides said
+ 
+# scale returns (arch library wants returns * 100 apparently)
+ret_scaled = daily_ret * 100
+ 
+print("Data loaded!")
+print(f"Number of observations: {len(ret_scaled)}")
+print(f"Mean return: {ret_scaled.mean():.4f}")
+print(f"Std return: {ret_scaled.std():.4f}")
+ 
+ 
+# -------------------------------------------------------
+# STEP 2: Split into train / test 
+# -------------------------------------------------------
+ 
+# using 80% for training and 20% for test (out-of-sample)
+train_size_num = int(len(ret_scaled) * 0.8)
+ 
+training_data_final = ret_scaled.iloc[:train_size_num]
+testing_data_OOS = ret_scaled.iloc[train_size_num:]  # OOS = out of sample
+ 
+print(f"\nTrain size: {len(training_data_final)}")
+print(f"Test size: {len(testing_data_OOS)}")
+ 
+# also saving the test size as a variable for later (i keep forgetting)
+n_test = len(testing_data_OOS)
+n_test2 = n_test  # redundant but whatever
+ 
+ 
+# -------------------------------------------------------
+# STEP 3: Fit GARCH(1,1) Model
+# -------------------------------------------------------
+ 
+# fit the basic GARCH(1,1) model on training data
+garch_model_11 = arch_model(training_data_final, vol='Garch', p=1, q=1, dist='normal')
+garch_result_fitted = garch_model_11.fit(disp='off')  # disp=off hides output
+ 
+print("\n=== GARCH(1,1) Results ===")
+print(garch_result_fitted.summary())
+ 
+# save the params (just in case i need them later)
+alpha_param = garch_result_fitted.params['alpha[1]']
+beta_param = garch_result_fitted.params['beta[1]']
+omega_param_val = garch_result_fitted.params['omega']
+ 
+print(f"\nalpha: {alpha_param:.4f}")
+print(f"beta: {beta_param:.4f}")
+print(f"persistence (alpha+beta): {alpha_param + beta_param:.4f}")  # should be < 1
+ 
+# also printing omega even tho its small
+print(f"omega: {omega_param_val:.6f}")
+ 
+ 
+# -------------------------------------------------------
+# STEP 4: GARCH(1,1) Forecasting (Rolling)
+# -------------------------------------------------------
+ 
+# rolling/expanding window forecast for the test period
+# i tried a few ways and this one seemed to work 
+ 
+garch_vol_preds = []   # store forecasted volatilities
+actual_vol_list = []   # store realized vol (squared returns)
+ 
+for step_i in range(n_test):
+    # use all training data + previous test observations
+    curr_window_data = ret_scaled.iloc[:train_size_num + step_i]
+    
+    # refit model (this takes a while...)
+    temp_model = arch_model(curr_window_data, vol='Garch', p=1, q=1, dist='normal')
+    temp_res = temp_model.fit(disp='off')
+    
+    # one step ahead forecast
+    forecast_obj = temp_res.forecast(horizon=1)
+    predicted_var = forecast_obj.variance.values[-1, 0]
+    predicted_vol = np.sqrt(predicted_var)  # variance -> std dev
+    
+    garch_vol_preds.append(predicted_vol)
+    
+    # realized volatility = squared return (common proxy)
+    actual_ret_val = testing_data_OOS.iloc[step_i]
+    realized_vol_sq = actual_ret_val ** 2  # squared return as proxy
+    actual_vol_list.append(realized_vol_sq)
+    
+    # print progress every 50 steps (helpful!)
+    if step_i % 50 == 0:
+        print(f"GARCH forecast step {step_i}/{n_test}")
+ 
+print("GARCH(1,1) forecasting done!")
+ 
+ 
+# -------------------------------------------------------
+# STEP 5: Fit EGARCH Model
+# -------------------------------------------------------
+ 
+# EGARCH captures leverage effect (bad news = more volatility than good news)
+# p=1, q=1 same as garch but with o=1 for asymmetry
+ 
+egarch_mod = arch_model(training_data_final, vol='EGARCH', p=1, o=1, q=1, dist='normal')
+egarch_fitted_res = egarch_mod.fit(disp='off')
+ 
+print("\n=== EGARCH Results ===")
+print(egarch_fitted_res.summary())
+ 
+ 
+# -------------------------------------------------------
+# STEP 6: EGARCH Forecasting (Rolling) - same loop as before
+# -------------------------------------------------------
+ 
+egarch_vol_predictions = []
+ 
+for ii in range(n_test):  # using ii instead of i (habit)
+    # expanding window
+    data_so_far = ret_scaled.iloc[:train_size_num + ii]
+    
+    # fit egarch
+    eg_mod_temp = arch_model(data_so_far, vol='EGARCH', p=1, o=1, q=1, dist='normal')
+    eg_res_temp = eg_mod_temp.fit(disp='off')
+    
+    # forecast
+    eg_forecast = eg_res_temp.forecast(horizon=1)
+    eg_var_pred = eg_forecast.variance.values[-1, 0]
+    eg_vol_pred = np.sqrt(eg_var_pred)
+    
+    egarch_vol_predictions.append(eg_vol_pred)
+    
+    if ii % 50 == 0:
+        print(f"EGARCH forecast step {ii}/{n_test}")
+ 
+print("EGARCH forecasting done!")
+ 
+ 
+# -------------------------------------------------------
+# STEP 7: Compute MSE and MAE (evaluation metrics)
+# -------------------------------------------------------
+ 
+# convert lists to arrays for easier math
+garch_preds_arr = np.array(garch_vol_preds)
+egarch_preds_arr = np.array(egarch_vol_predictions)
+actual_vol_arr = np.array(actual_vol_list)
+ 
+# ------ GARCH(1,1) errors ------
+# MSE = mean squared error
+garch_errors = garch_preds_arr - actual_vol_arr
+garch_squared_errors = garch_errors ** 2
+garch_MSE_val = np.mean(garch_squared_errors)
+ 
+# MAE = mean absolute error  
+garch_abs_errors = np.abs(garch_errors)
+garch_MAE_val = np.mean(garch_abs_errors)
+ 
+# double checking MSE manually (redundant but helps me understand)
+garch_MSE_check = np.sum(garch_squared_errors) / len(garch_squared_errors)
+assert round(garch_MSE_val, 8) == round(garch_MSE_check, 8), "MSE mismatch??"
+ 
+# ------ EGARCH errors ------
+egarch_errors_arr = egarch_preds_arr - actual_vol_arr
+egarch_sq_errors = egarch_errors_arr ** 2
+egarch_MSE_val = np.mean(egarch_sq_errors)
+ 
+egarch_abs_err = np.abs(egarch_errors_arr)
+egarch_MAE_val = np.mean(egarch_abs_err)
+ 
+# print results
+print("\n========== MODEL COMPARISON ==========")
+print(f"{'Metric':<15} {'GARCH(1,1)':<15} {'EGARCH':<15}")
+print("-" * 45)
+print(f"{'MSE':<15} {garch_MSE_val:<15.4f} {egarch_MSE_val:<15.4f}")
+print(f"{'MAE':<15} {garch_MAE_val:<15.4f} {egarch_MAE_val:<15.4f}")
+print("======================================")
+ 
+# which model is better??
+if garch_MSE_val < egarch_MSE_val:
+    print("\nGARCH(1,1) wins by MSE")
+else:
+    print("\nEGARCH wins by MSE")
+ 
+if garch_MAE_val < egarch_MAE_val:
+    print("GARCH(1,1) wins by MAE")
+else:
+    print("EGARCH wins by MAE")
+ 
+ 
+# -------------------------------------------------------
+# STEP 8: Plotting
+# -------------------------------------------------------
+ 
+# plot the forecasted vs realized volatility
+fig, axes_obj = plt.subplots(2, 1, figsize=(12, 8))
+ 
+# GARCH plot
+axes_obj[0].plot(actual_vol_arr, label='Realized Vol (squared returns)', color='black', alpha=0.6)
+axes_obj[0].plot(garch_preds_arr, label='GARCH(1,1) Forecast', color='blue', alpha=0.8)
+axes_obj[0].set_title('GARCH(1,1): Forecasted vs Realized Volatility')
+axes_obj[0].legend()
+axes_obj[0].set_ylabel("Volatility")
+ 
+# EGARCH plot
+axes_obj[1].plot(actual_vol_arr, label='Realized Vol (squared returns)', color='black', alpha=0.6)
+axes_obj[1].plot(egarch_preds_arr, label='EGARCH Forecast', color='red', alpha=0.8)
+axes_obj[1].set_title('EGARCH: Forecasted vs Realized Volatility')
+axes_obj[1].legend()
+axes_obj[1].set_ylabel("Volatility")
+axes_obj[1].set_xlabel("Out-of-Sample Periods")
+ 
+plt.tight_layout()
+plt.savefig('garch_comparison_plot.png', dpi=150)
+plt.show()
+print("Plot saved!")
+ 
+ 
+# -------------------------------------------------------
+# BONUS: regime analysis (like the assignment said)
+# -------------------------------------------------------
+ 
+# split test period into "high vol" and "low vol" regimes
+# using median as cutoff (kinda arbitrary but ok)
+ 
+median_vol_cutoff = np.median(actual_vol_arr)
+high_vol_mask = actual_vol_arr > median_vol_cutoff
+low_vol_mask = actual_vol_arr <= median_vol_cutoff  # opposite of above
+ 
+# GARCH MSE by regime
+garch_mse_highvol = np.mean((garch_preds_arr[high_vol_mask] - actual_vol_arr[high_vol_mask])**2)
+garch_mse_lowvol  = np.mean((garch_preds_arr[low_vol_mask]  - actual_vol_arr[low_vol_mask])**2)
+ 
+# EGARCH MSE by regime
+egarch_mse_highvol = np.mean((egarch_preds_arr[high_vol_mask] - actual_vol_arr[high_vol_mask])**2)
+egarch_mse_lowvol  = np.mean((egarch_preds_arr[low_vol_mask]  - actual_vol_arr[low_vol_mask])**2)
+ 
+print("\n===== MSE by Regime =====")
+print(f"{'Regime':<15} {'GARCH MSE':<15} {'EGARCH MSE':<15}")
+print("-" * 45)
+print(f"{'High Vol':<15} {garch_mse_highvol:<15.4f} {egarch_mse_highvol:<15.4f}")
+print(f"{'Low Vol':<15} {garch_mse_lowvol:<15.4f} {egarch_mse_lowvol:<15.4f}")
+ 
+# NOTE TO SELF: EGARCH should do better in high vol bc of leverage effect
+# if not then maybe i did something wrong lol
