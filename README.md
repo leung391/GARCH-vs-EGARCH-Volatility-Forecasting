@@ -8,12 +8,14 @@ What I did
 - Split into 80% train / 20% test
 - Ran rolling 1-step ahead forecasts (refit each time)
 - Compared using MSE and MAE
-- Also checked performance in high vs low volatility periods
+- Also checked performance in high vs low volatility periods\
+
 Output
 - Model summaries
 - Error comparison (MSE, MAE)
 - Plots of predicted vs actual volatility
 - Extra breakdown by volatility regime
+
 Notes To Reader
 - Using squared returns as a proxy for volatility
 - Rolling refit is slow but I wanted to understand it properly
